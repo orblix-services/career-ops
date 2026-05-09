@@ -20,6 +20,9 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createInterface } from 'readline';
+import yaml from 'js-yaml';
+import { recordEvaluation } from './scripts/lib/audit.mjs';
 
 // ---------------------------------------------------------------------------
 // Bootstrap: load .env before anything else
@@ -71,6 +74,8 @@ if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     --file <path>    Read JD from a file instead of inline text
     --model <name>   Gemini model to use (default: gemini-2.0-flash)
     --no-save        Do not save report to reports/ directory
+    --no-pii         Redact PII from CV before sending to Gemini
+    --yes            Skip the data-transfer confirmation prompt
     --help           Show this help
 
   SETUP
@@ -87,8 +92,11 @@ if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
 
 // Parse flags
 let jdText = '';
+let jdPath = null;
 let modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 let saveReport = true;
+let noPii = false;
+let autoYes = false;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--file' && args[i + 1]) {
@@ -97,11 +105,16 @@ for (let i = 0; i < args.length; i++) {
       console.error(`❌  File not found: ${filePath}`);
       process.exit(1);
     }
+    jdPath = filePath;
     jdText = readFileSync(filePath, 'utf-8').trim();
   } else if (args[i] === '--model' && args[i + 1]) {
     modelName = args[++i];
   } else if (args[i] === '--no-save') {
     saveReport = false;
+  } else if (args[i] === '--no-pii') {
+    noPii = true;
+  } else if (args[i] === '--yes') {
+    autoYes = true;
   } else if (!args[i].startsWith('--')) {
     jdText += (jdText ? '\n' : '') + args[i];
   }
@@ -110,6 +123,93 @@ for (let i = 0; i < args.length; i++) {
 if (!jdText) {
   console.error('❌  No Job Description provided. Run with --help for usage.');
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// GDPR / data-transfer notice + PII redaction helper
+// ---------------------------------------------------------------------------
+function redactPII(text) {
+  const profilePath = join(ROOT, 'config', 'profile.yml');
+  if (!existsSync(profilePath)) return text;
+
+  let profile;
+  try {
+    profile = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
+  } catch {
+    return text;
+  }
+
+  const candidate = profile.candidate || {};
+  const compensation = profile.compensation || {};
+  const location = profile.location || {};
+
+  const replacements = [
+    [candidate.full_name, 'NAME'],
+    [candidate.email, 'EMAIL'],
+    [candidate.phone, 'PHONE'],
+    [candidate.location, 'LOCATION'],
+    [candidate.linkedin, 'LINKEDIN'],
+    [candidate.linkedin_url, 'LINKEDIN'],
+    [candidate.portfolio_url, 'PORTFOLIO'],
+    [candidate.github, 'GITHUB'],
+    [candidate.github_url, 'GITHUB'],
+    [candidate.twitter, 'TWITTER'],
+    [candidate.twitter_url, 'TWITTER'],
+    [compensation.target_range, 'SALARY'],
+    [compensation.minimum, 'SALARY'],
+    [location.city, 'CITY'],
+    [location.country, 'COUNTRY'],
+  ];
+
+  let out = text;
+  for (const [value, label] of replacements) {
+    if (!value) continue;
+    const v = String(value).trim();
+    if (!v) continue;
+    // Escape regex special chars
+    const escaped = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(escaped, 'g'), `[REDACTED:${label}]`);
+  }
+  return out;
+}
+
+async function dataTransferNotice() {
+  const banner = `─────────────────────────────────────────────────────────────────────
+⚠  GEMINI EVALUATION — DATA TRANSFER NOTICE
+─────────────────────────────────────────────────────────────────────
+This will send to Google (generativelanguage.googleapis.com):
+  • Your full CV (cv.md)
+  • The job description
+  • Internal evaluation prompts
+
+Free-tier API requests may be retained and used to improve Google's
+models. For PII (résumé, contacts, salary expectations), this means
+your data may be incorporated into training datasets.
+
+GDPR: if you process third-party data (e.g., as a recruiter/coach),
+this transfer requires a documented legal basis. Use a paid Vertex AI
+project with EU data residency, or run with --no-pii.
+
+Continue? (y/N) [auto-skipped with --yes]
+─────────────────────────────────────────────────────────────────────`;
+  console.log(banner);
+  if (autoYes) {
+    console.log('[--yes] auto-confirmed.');
+    return;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise(resolve => rl.question('> ', resolve));
+  rl.close();
+  if (!/^y(es)?$/i.test(String(answer).trim())) {
+    console.error('Aborted by user.');
+    process.exit(1);
+  }
+}
+
+if (!noPii) {
+  await dataTransferNotice();
+} else {
+  console.log('[--no-pii] PII will be redacted from CV before sending to Gemini.');
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +265,11 @@ console.log('\n📂  Loading context files...');
 
 const sharedContext  = readFile(PATHS.shared,   'modes/_shared.md');
 const ofertaLogic    = readFile(PATHS.oferta,   'modes/oferta.md');
-const cvContent      = readFile(PATHS.cv,       'cv.md');
+let   cvContent      = readFile(PATHS.cv,       'cv.md');
+
+if (noPii) {
+  cvContent = redactPII(cvContent);
+}
 
 // ---------------------------------------------------------------------------
 // Build the system prompt (mirrors the Claude skill router logic)
@@ -289,6 +393,7 @@ if (saveReport) {
     const filename    = `${num}-${companySlug}-${today}.md`;
     const reportPath  = join(PATHS.reports, filename);
 
+    const modeLine = noPii ? '\n**Mode:** --no-pii (PII redacted)' : '';
     const reportContent = `# Evaluation: ${company} — ${role}
 
 **Date:** ${today}
@@ -296,7 +401,7 @@ if (saveReport) {
 **Score:** ${score}/5
 **Legitimacy:** ${legitimacy}
 **PDF:** pending
-**Tool:** Gemini (${modelName})
+**Tool:** Gemini (${modelName})${modeLine}
 
 ---
 
@@ -305,6 +410,23 @@ ${evaluationText.replace(/---SCORE_SUMMARY---[\s\S]*?---END_SUMMARY---/, '').tri
 
     writeFileSync(reportPath, reportContent, 'utf-8');
     console.log(`\n✅  Report saved: reports/${filename}`);
+
+    // Audit log
+    try {
+      const parsedScore = parseFloat(score);
+      recordEvaluation({
+        mode: 'oferta',
+        cli: 'gemini-eval',
+        model: modelName,
+        modelVersion: 'unknown',
+        sourceFiles: [PATHS.cv, PATHS.shared, PATHS.oferta, ...(jdPath ? [jdPath] : [])],
+        reportPath,
+        score: Number.isFinite(parsedScore) ? parsedScore : null,
+        extra: { redacted: noPii, company, role, archetype, legitimacy },
+      });
+    } catch (auditErr) {
+      console.warn(`⚠️   Audit log skipped: ${auditErr.message}`);
+    }
 
     // Append tracker entry reminder
     console.log(`\n📊  Tracker entry (add to data/applications.md):`);

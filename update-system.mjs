@@ -19,6 +19,7 @@ import { execFileSync, execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createInterface } from 'readline';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -143,6 +144,47 @@ function addPaths(paths) {
   git('add', '--', ...paths);
 }
 
+// Prompt the user for an explicit "apply <shortSha>" confirmation before
+// overwriting system files. Skipped only when --yes-i-trust-upstream is set.
+async function confirmUpdate(targetSha) {
+  const shortSha = String(targetSha || '').slice(0, 12) || 'unknown';
+  let changedFiles = [];
+  try {
+    const diff = git('diff', '--name-only', 'HEAD', 'FETCH_HEAD');
+    changedFiles = diff.split('\n').map(s => s.trim()).filter(Boolean);
+  } catch {
+    // Diff failed — show no file list, but still require confirmation.
+  }
+
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`  About to apply upstream commit ${shortSha}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if (changedFiles.length > 0) {
+    const preview = changedFiles.slice(0, 25);
+    console.log(`Files that will be overwritten (${changedFiles.length}):`);
+    for (const f of preview) console.log(`  • ${f}`);
+    if (changedFiles.length > preview.length) {
+      console.log(`  … and ${changedFiles.length - preview.length} more`);
+    }
+  } else {
+    console.log('Could not enumerate changed files (diff failed). Proceed with caution.');
+  }
+  console.log('');
+
+  const expected = `apply ${shortSha}`;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise(resolve => {
+    rl.question(`Type "${expected}" to confirm (or anything else to abort): `, resolve);
+  });
+  rl.close();
+
+  if (String(answer).trim() !== expected) {
+    console.error('Aborted: confirmation did not match.');
+    process.exit(1);
+  }
+}
+
 // ── CHECK ───────────────────────────────────────────────────────
 
 async function check() {
@@ -265,6 +307,20 @@ async function apply() {
     console.log('Fetching latest from upstream...');
     git('fetch', CANONICAL_REPO, 'main');
 
+    // 2b. Explicit confirmation unless --yes-i-trust-upstream was passed
+    const skipConfirm = process.argv.includes('--yes-i-trust-upstream');
+    let targetSha = '';
+    try {
+      targetSha = git('rev-parse', 'FETCH_HEAD');
+    } catch {
+      targetSha = 'unknown';
+    }
+    if (!skipConfirm) {
+      await confirmUpdate(targetSha);
+    } else {
+      console.log(`[--yes-i-trust-upstream] skipping confirmation for ${String(targetSha).slice(0, 12)}`);
+    }
+
     // 3. Checkout system files only
     console.log('Updating system files...');
     const updated = [];
@@ -300,11 +356,11 @@ async function apply() {
       process.exit(1);
     }
 
-    // 5. Install any new dependencies
+    // 5. Install any new dependencies (use npm ci to honor lockfile exactly)
     try {
-      execSync('npm install --silent', { cwd: ROOT, timeout: 60000 });
+      execSync('npm ci --silent', { cwd: ROOT, timeout: 120000 });
     } catch {
-      console.log('npm install skipped (may need manual run)');
+      console.log('npm ci skipped (may need manual run; ensure package-lock.json is committed)');
     }
 
     // 6. Commit the update

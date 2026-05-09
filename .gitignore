@@ -44,4 +44,6 @@ bun.lock
 .claude/settings.local.json
 .claude/memory/
 career-dashboard
-package-lock.json
+
+# Runtime audit log (per-machine, never committed)
+data/audit-log.jsonl

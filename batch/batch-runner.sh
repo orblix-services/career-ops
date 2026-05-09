@@ -33,6 +33,7 @@ RETRY_FAILED=false
 START_FROM=0
 MAX_RETRIES=2
 MIN_SCORE=0
+UNSAFE=false
 
 usage() {
   cat <<'USAGE'
@@ -48,6 +49,10 @@ Options:
   --start-from N       Start from offer ID N (skip earlier IDs)
   --max-retries N      Max retry attempts per offer (default: 2)
   --min-score N        Skip PDF/tracker for offers scoring below N (default: 0 = off)
+  --unsafe             Run worker with --dangerously-skip-permissions (full shell access).
+                       Only use with trusted JD sources. Default is safe mode with a
+                       restricted allowed-tools set (Read Edit Write Glob Grep WebFetch).
+                       Alias: --dangerously-skip-permissions
   -h, --help           Show this help
 
 Files:
@@ -81,10 +86,19 @@ while [[ $# -gt 0 ]]; do
     --start-from) START_FROM="$2"; shift 2 ;;
     --max-retries) MAX_RETRIES="$2"; shift 2 ;;
     --min-score) MIN_SCORE="$2"; shift 2 ;;
+    --unsafe|--dangerously-skip-permissions) UNSAFE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
+
+# Security mode banner
+if [[ "$UNSAFE" == "true" ]]; then
+  printf '\033[1;31m[WARNING] Running in UNSAFE mode — agent has full shell access. Only use with trusted JD sources.\033[0m\n' >&2
+else
+  echo "[INFO] Safe mode: workers run with a restricted allowed-tools set (Read Edit Write Glob Grep WebFetch)."
+  echo "       No Bash access. Override with --unsafe if you trust the JD sources."
+fi
 
 # Lock file to prevent double execution
 acquire_lock() {
@@ -356,12 +370,21 @@ process_offer() {
     "$PROMPT_FILE" > "$resolved_prompt"
 
   # Launch claude -p worker (uses default model from Claude Max subscription)
+  # Permission flags depend on UNSAFE mode (see top-of-file banner).
   local exit_code=0
-  claude -p \
-    --dangerously-skip-permissions \
-    --append-system-prompt-file "$resolved_prompt" \
-    "$prompt" \
-    > "$log_file" 2>&1 || exit_code=$?
+  if [[ "$UNSAFE" == "true" ]]; then
+    claude -p \
+      --dangerously-skip-permissions \
+      --append-system-prompt-file "$resolved_prompt" \
+      "$prompt" \
+      > "$log_file" 2>&1 || exit_code=$?
+  else
+    claude -p \
+      --allowedTools "Read Edit Write Glob Grep WebFetch" \
+      --append-system-prompt-file "$resolved_prompt" \
+      "$prompt" \
+      > "$log_file" 2>&1 || exit_code=$?
+  fi
 
   # Cleanup resolved prompt
   rm -f "$resolved_prompt"

@@ -82,3 +82,16 @@ endorsement.
 ## 11. Changes
 
 This disclaimer may be updated as the project evolves. Users are encouraged to review it periodically.
+
+## GDPR / professional use
+
+career-ops is designed for **personal use** (the GDPR Article 2(2)(c) "household exemption" typically applies). If you use it on behalf of others — recruiter, career coach, agency processing candidate CVs — you become a Data Controller under GDPR. In that case:
+
+1. Establish a documented legal basis (informed consent is the usual path) before importing third-party CVs.
+2. Disclose to the data subject that their CV will be sent to your chosen AI provider (Anthropic, Google, OpenAI). Link to the provider's privacy policy.
+3. For Google Gemini, prefer a paid Vertex AI project with EU data residency over the free-tier (which may train on your prompts).
+4. For Anthropic, enable "Zero Data Retention" via your Enterprise/API account settings.
+5. Honour right of erasure: run `npm run purge -- --older-than 0d --slug <name>` to remove a specific candidate's data.
+6. Set a retention policy: by default, the project provides `npm run purge -- --older-than 90d` to clear stale `output/`, `reports/`, and closed entries.
+
+The maintainer is **not** a Data Controller or Data Processor. You assume all controller obligations.
